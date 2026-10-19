@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ScreenToPdf</string>
+
+    <!-- Home -->
+    <string name="home_title">Screen to PDF</string>
+    <string name="home_help">Point your phone at the computer screen. Press record. Scroll slowly and pause about one second on each page.</string>
+    <string name="home_record">Record the screen</string>
+    <string name="home_pick">Pick a video</string>
+
+    <!-- Capture -->
+    <string name="capture_back">Back</string>
+    <string name="capture_permission_needed">The app needs the camera to record the screen.</string>
+    <string name="capture_permission_denied">Camera access is off. You can turn it on in the app settings.</string>
+    <string name="capture_grant">Allow camera</string>
+    <string name="capture_open_settings">Open settings</string>
+    <string name="capture_hint">Fit the screen inside the frame. Scroll slowly.</string>
+    <string name="capture_record">Record</string>
+    <string name="capture_stop">Stop</string>
+    <string name="capture_camera_failed">Could not start the camera.</string>
+    <string name="capture_record_failed">The recording did not save. Please try again.</string>
+
+    <!-- Processing -->
+    <string name="processing_title">Making your PDF</string>
+    <string name="processing_cancel">Cancel</string>
+    <string name="processing_retry">Try again</string>
+    <string name="processing_back">Back</string>
+    <string name="processing_error_title">Something went wrong</string>
+    <string name="processing_page_preview">Page preview</string>
+
+    <!-- Result -->
+    <string name="result_title">Your PDF is ready</string>
+    <string name="result_reading">Checking the file</string>
+    <string name="result_share">Share</string>
+    <string name="result_share_title">Share PDF</string>
+    <string name="result_open">Open</string>
+    <string name="result_save">Save to Downloads</string>
+    <string name="result_again">Start again</string>
+    <string name="result_saved">Saved to Downloads</string>
+    <string name="result_save_failed">Could not save the file</string>
+    <string name="result_no_viewer">No app can open PDF files</string>
+    <string name="result_no_share">No app can share this file</string>
+    <string name="result_need_storage">The app needs storage access to save the file.</string>
+</resources>
