@@ -12,8 +12,19 @@ android {
         applicationId = "com.aiden.screentopdf"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.3.1"
+    }
+
+    // One fixed debug key, so every GitHub build can update the app already on the phone.
+    // This is the standard public debug key setup, not a secret.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
