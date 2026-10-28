@@ -90,6 +90,7 @@ fun ProcessingScreen(
         } else {
             ProgressContent(
                 progress = state.progress,
+                stage = state.stage.label,
                 status = state.status,
                 thumbnails = state.thumbnails,
                 onCancel = cancelAndLeave,
@@ -101,6 +102,7 @@ fun ProcessingScreen(
 @Composable
 private fun ProgressContent(
     progress: Float,
+    stage: String,
     status: String,
     thumbnails: List<Bitmap>,
     onCancel: () -> Unit,
@@ -110,7 +112,15 @@ private fun ProgressContent(
         style = MaterialTheme.typography.headlineMedium,
         textAlign = TextAlign.Center,
     )
-    Spacer(Modifier.height(32.dp))
+    Spacer(Modifier.height(12.dp))
+    // The current big step, such as "Claude is reading the document".
+    Text(
+        text = stage,
+        style = MaterialTheme.typography.titleLarge,
+        color = MaterialTheme.colorScheme.primary,
+        textAlign = TextAlign.Center,
+    )
+    Spacer(Modifier.height(24.dp))
     LinearProgressIndicator(
         progress = { progress.coerceIn(0f, 1f) },
         modifier = Modifier

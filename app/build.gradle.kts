@@ -32,7 +32,15 @@ android {
         compose = true
     }
     packaging {
-        resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        resources.excludes += setOf(
+            "/META-INF/{AL2.0,LGPL2.1}",
+            "/META-INF/DEPENDENCIES",
+            "/META-INF/LICENSE*",
+            "/META-INF/NOTICE*",
+            "/META-INF/INDEX.LIST",
+            "/META-INF/*.kotlin_module",
+            "/META-INF/versions/9/previous-compilation-data.bin",
+        )
     }
 }
 
@@ -72,6 +80,12 @@ dependencies {
 
     // ML Kit on-device text recognition (OCR for the searchable text layer)
     implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    // Anthropic Claude API (official Java SDK, works from Kotlin)
+    implementation("com.anthropic:anthropic-java:2.34.0")
+
+    // Encrypted storage for the API key
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     // Google Play services tasks -> coroutines bridge
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.9.0")

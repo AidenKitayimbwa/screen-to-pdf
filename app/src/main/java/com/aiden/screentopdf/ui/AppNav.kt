@@ -11,6 +11,7 @@ import androidx.navigation.navArgument
 
 object Routes {
     const val HOME = "home"
+    const val SETTINGS = "settings"
     const val CAPTURE = "capture"
     const val PROCESSING = "processing/{videoUriEncoded}"
     const val RESULT = "result/{pdfPathEncoded}"
@@ -30,6 +31,12 @@ fun AppNav() {
                 onVideoPicked = { uri ->
                     navController.navigate(Routes.processing(uri))
                 },
+                onSettings = { navController.navigate(Routes.SETTINGS) },
+            )
+        }
+        composable(Routes.SETTINGS) {
+            SettingsScreen(
+                onBack = { navController.popBackStack() },
             )
         }
         composable(Routes.CAPTURE) {

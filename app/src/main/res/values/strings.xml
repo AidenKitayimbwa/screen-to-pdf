@@ -4,9 +4,30 @@
 
     <!-- Home -->
     <string name="home_title">Screen to PDF</string>
-    <string name="home_help">Point your phone at the computer screen. Press record. Scroll slowly and pause about one second on each page.</string>
+    <string name="home_help">Point your phone at the computer screen. Fill the view with the document. Scroll slowly from top to bottom. Pausing on each page helps.</string>
     <string name="home_record">Record the screen</string>
     <string name="home_pick">Pick a video</string>
+    <string name="home_settings">Settings</string>
+    <string name="home_no_key_title">Add your Claude API key to get clean, rebuilt documents</string>
+    <string name="home_no_key_body">Without a key the app makes a photo copy of the screen.</string>
+    <string name="home_no_key_button">Open settings</string>
+
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_back">Back</string>
+    <string name="settings_key_heading">Claude API key</string>
+    <string name="settings_key_label">API key</string>
+    <string name="settings_key_show">Show key</string>
+    <string name="settings_key_hide">Hide key</string>
+    <string name="settings_key_saved">Saved</string>
+    <string name="settings_key_not_saved">No key saved</string>
+    <string name="settings_key_save">Save</string>
+    <string name="settings_key_remove">Remove</string>
+    <string name="settings_key_where">Get a key at console.anthropic.com, under API keys.</string>
+    <string name="settings_privacy">Your key stays on this phone in encrypted storage. Page images are sent to Anthropic to read the document.</string>
+    <string name="settings_model_heading">Model</string>
+    <string name="settings_model_sonnet">Sonnet 5.5 — best quality (about US$0.05 to US$0.30 per document)</string>
+    <string name="settings_model_haiku">Haiku 5.5 — cheapest, may make more mistakes</string>
 
     <!-- Capture -->
     <string name="capture_back">Back</string>
@@ -31,6 +52,12 @@
     <!-- Result -->
     <string name="result_title">Your PDF is ready</string>
     <string name="result_reading">Checking the file</string>
+    <string name="result_notes">Notes</string>
+    <string name="result_preview">Preview</string>
+    <string name="result_preview_loading">Loading the preview</string>
+    <string name="result_preview_failed">Could not show a preview. Use Open to view the file.</string>
+    <string name="result_preview_more">Only the first %1$d pages are shown here. Open the file to see them all.</string>
+    <string name="result_preview_page">Page %1$d</string>
     <string name="result_share">Share</string>
     <string name="result_share_title">Share PDF</string>
     <string name="result_open">Open</string>

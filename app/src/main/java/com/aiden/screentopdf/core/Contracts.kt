@@ -60,4 +60,6 @@ object Pipeline {
     lateinit var frameSource: FrameSource
     lateinit var pageCleaner: PageCleaner
     lateinit var pdfBuilder: PdfBuilder
+    lateinit var documentReader: DocumentReader
+    lateinit var documentRenderer: DocumentRenderer
 }
