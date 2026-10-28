@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.VideoLibrary
 import androidx.compose.material.icons.filled.Videocam
@@ -49,6 +50,7 @@ fun HomeScreen(
     onRecord: () -> Unit,
     onVideoPicked: (Uri) -> Unit,
     onSettings: () -> Unit,
+    onHistory: () -> Unit,
 ) {
     val pickVideo = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -135,6 +137,17 @@ fun HomeScreen(
                 Icon(Icons.Default.VideoLibrary, contentDescription = null, modifier = Modifier.size(28.dp))
                 Spacer(Modifier.size(12.dp))
                 Text(stringResource(R.string.home_pick), style = MaterialTheme.typography.titleLarge)
+            }
+            Spacer(Modifier.height(16.dp))
+            OutlinedButton(
+                onClick = onHistory,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+            ) {
+                Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.size(12.dp))
+                Text(stringResource(R.string.home_history), style = MaterialTheme.typography.titleMedium)
             }
         }
     }

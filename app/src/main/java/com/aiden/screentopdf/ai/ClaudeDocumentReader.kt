@@ -11,6 +11,7 @@ import com.aiden.screentopdf.core.PageSetup
 import com.aiden.screentopdf.core.PaperSize
 import com.aiden.screentopdf.core.ProgressListener
 import com.aiden.screentopdf.core.RebuiltDocument
+import com.aiden.screentopdf.core.UsageCost
 import com.aiden.screentopdf.core.TextRun
 import com.anthropic.client.AnthropicClient
 import com.anthropic.client.okhttp.AnthropicOkHttpClient
@@ -100,6 +101,9 @@ class ClaudeDocumentReader : DocumentReader {
         var setup: PageSetup? = null
         var inputTokens = 0L
         var outputTokens = 0L
+        var cacheReadTokens = 0L
+        var cacheWriteTokens = 0L
+        var requests = 0
 
         // Work list of frame index ranges. A batch that hits max_tokens is split in two.
         val work = ArrayDeque<List<Int>>()
@@ -123,6 +127,9 @@ class ClaudeDocumentReader : DocumentReader {
 
             inputTokens += response.usage().inputTokens()
             outputTokens += response.usage().outputTokens()
+            cacheReadTokens += response.usage().cacheReadInputTokens().orElse(0L)
+            cacheWriteTokens += response.usage().cacheCreationInputTokens().orElse(0L)
+            requests++
 
             val stop = response.stopReason().orElse(null)
             if (stop == StopReason.REFUSAL) {
@@ -167,7 +174,8 @@ class ClaudeDocumentReader : DocumentReader {
         onProgress(PROGRESS_READ_SHARE, "Copying pictures from the frames")
         val withImages = cropImages(merged, frames, warnings)
 
-        warnings.add(costLine(model, inputTokens, outputTokens))
+        val usage = usageCost(model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, requests)
+        warnings.add(costLine(usage))
         onProgress(1f, "Document read")
 
         return RebuiltDocument(
@@ -175,6 +183,7 @@ class ClaudeDocumentReader : DocumentReader {
             setup = setup ?: PageSetup(),
             blocks = withImages,
             warnings = warnings,
+            usage = usage,
         )
     }
 
@@ -331,13 +340,34 @@ class ClaudeDocumentReader : DocumentReader {
             .mapNotNull { block -> block.text().orElse(null) }
             .joinToString("") { it.text() }
 
-    private fun costLine(model: String, inputTokens: Long, outputTokens: Long): String {
+    /**
+     * Works out the cost from list prices in US dollars per million tokens.
+     * Cache reads cost 10% of the input price and cache writes 125%.
+     */
+    private fun usageCost(
+        model: String,
+        inputTokens: Long,
+        outputTokens: Long,
+        cacheReadTokens: Long,
+        cacheWriteTokens: Long,
+        requests: Int,
+    ): UsageCost {
         val (inRate, outRate) = if (model == ApiKeyStore.MODEL_HAIKU) 0.10 to 0.50 else 2.0 to 10.0
-        val cost = inputTokens / 1_000_000.0 * inRate + outputTokens / 1_000_000.0 * outRate
+        val cost = (
+            inputTokens * inRate +
+                outputTokens * outRate +
+                cacheReadTokens * inRate * 0.10 +
+                cacheWriteTokens * inRate * 1.25
+            ) / 1_000_000.0
+        return UsageCost(model, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, requests, cost)
+    }
+
+    private fun costLine(usage: UsageCost): String {
+        val totalIn = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
         return String.format(
             Locale.UK,
-            "Estimated cost: ${'$'}%.3f (%,d input tokens, %,d output tokens, model %s).",
-            cost, inputTokens, outputTokens, model,
+            "Estimated cost: US${'$'}%.3f (%,d input tokens, %,d output tokens, model %s).",
+            usage.costUsd, totalIn, usage.outputTokens, usage.model,
         )
     }
 

@@ -9,6 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.aiden.screentopdf.core.CapturedPage
 import com.aiden.screentopdf.core.Pipeline
 import com.aiden.screentopdf.core.RebuiltDocument
+import com.aiden.screentopdf.history.HistoryEntry
+import com.aiden.screentopdf.history.HistoryStore
+import com.aiden.screentopdf.pdf.PdfMetadata
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -22,6 +25,7 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import kotlin.coroutines.coroutineContext
 
 /**
@@ -149,15 +153,18 @@ class ProcessingViewModel : ViewModel() {
 
             // Part 3: ask Claude to rebuild the document, or fall back to a photo copy.
             val notes = ArrayList<String>()
-            val rebuilt: File? = if (Pipeline.documentReader.isReady()) {
+            val attempt: RebuildAttempt = if (Pipeline.documentReader.isReady()) {
                 rebuildDocument(id, pages, outFile, notes)
             } else {
                 notes += "No API key saved, so this is a photo copy. " +
                     "Add a key in Settings for a rebuilt document."
-                null
+                RebuildAttempt(file = null, doc = null, claudeFailed = false)
             }
-            val pdf: File = rebuilt ?: buildPhotoCopy(id, pages, outFile)
+            val pdf: File = attempt.file ?: buildPhotoCopy(id, pages, outFile)
             coroutineContext.ensureActive()
+
+            // Part 4: keep the PDF and record what it cost.
+            val kept = keepInHistory(pdf, attempt, notes)
 
             if (id == runId) ResultNotes.lines = notes
             updateState(id) {
@@ -166,7 +173,7 @@ class ProcessingViewModel : ViewModel() {
                     stage = Stage.BUILDING,
                     status = "Done",
                     notice = notes.firstOrNull(),
-                    pdfPath = pdf.absolutePath,
+                    pdfPath = kept.absolutePath,
                 )
             }
         } catch (e: CancellationException) {
@@ -190,15 +197,27 @@ class ProcessingViewModel : ViewModel() {
     }
 
     /**
+     * What the rebuilt route produced.
+     * [file] is the typeset PDF, or null when the app must fall back to a photo copy.
+     * [doc] is Claude's document when the read succeeded, even if typesetting then failed.
+     * [claudeFailed] is true when Claude was called but threw, so its cost is unknown.
+     */
+    private class RebuildAttempt(
+        val file: File?,
+        val doc: RebuiltDocument?,
+        val claudeFailed: Boolean,
+    )
+
+    /**
      * Reads the frames with Claude and typesets the result.
-     * Returns null, and adds a note, when the rebuilt route fails for a reason other than cancel.
+     * Returns no file, and adds a note, when the rebuilt route fails for a reason other than cancel.
      */
     private suspend fun rebuildDocument(
         id: Int,
         cleaned: List<CapturedPage>,
         outFile: File,
         notes: MutableList<String>,
-    ): File? {
+    ): RebuildAttempt {
         val doc: RebuiltDocument = try {
             setProgress(id, CLEAN_END, Stage.READING, "Sending the pages to Claude")
             Pipeline.documentReader.read(cleaned) { fraction, status ->
@@ -216,7 +235,8 @@ class ProcessingViewModel : ViewModel() {
             Log.e(TAG, "Claude could not read the document", e)
             notes += "Claude could not read the document: ${shortMessage(e)}. " +
                 "This is a photo copy instead."
-            return null
+            notes += "Claude failed; the cost of that attempt is not included"
+            return RebuildAttempt(file = null, doc = null, claudeFailed = true)
         }
         coroutineContext.ensureActive()
         notes += doc.warnings
@@ -226,7 +246,7 @@ class ProcessingViewModel : ViewModel() {
             val pdf = Pipeline.documentRenderer.render(doc, outFile) { fraction, status ->
                 setProgress(id, READ_END + (1f - READ_END) * fraction.coerceIn(0f, 1f), Stage.BUILDING, status)
             }
-            pdf
+            RebuildAttempt(file = pdf, doc = doc, claudeFailed = false)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -234,8 +254,60 @@ class ProcessingViewModel : ViewModel() {
             Log.e(TAG, "Could not typeset the document", e)
             notes += "Could not build the rebuilt document: ${shortMessage(e)}. " +
                 "This is a photo copy instead."
-            null
+            RebuildAttempt(file = null, doc = doc, claudeFailed = false)
         }
+    }
+
+    /**
+     * Copies the PDF out of the cache into the app's history folder and records the entry.
+     * Returns the kept file, or the cache file if the copy failed. Never throws.
+     */
+    private fun keepInHistory(pdf: File, attempt: RebuildAttempt, notes: List<String>): File {
+        val now = Date()
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.UK).format(now)
+        val id = "ScreenToPdf-$stamp-" + UUID.randomUUID().toString().take(8)
+
+        val kept: File = try {
+            val target = File(HistoryStore.pdfDir, "$id.pdf")
+            pdf.copyTo(target, overwrite = true)
+            if (!pdf.delete()) Log.w(TAG, "Could not remove the cached PDF ${pdf.name}")
+            target
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not keep the PDF in history, using the cache copy", e)
+            pdf
+        }
+
+        val doc = attempt.doc
+        val usage = doc?.usage
+        val rebuilt = attempt.file != null && doc != null
+        val title = if (rebuilt && doc.title.isNotBlank()) {
+            doc.title.trim()
+        } else {
+            "Photo copy, " + SimpleDateFormat("d MMM yyyy", Locale.UK).format(now)
+        }
+        val entry = HistoryEntry(
+            id = id,
+            createdAtMillis = now.time,
+            title = title,
+            pdfPath = kept.absolutePath,
+            pageCount = PdfMetadata.pageCount(kept),
+            fileSizeBytes = kept.length(),
+            mode = if (rebuilt) HistoryEntry.MODE_REBUILT else HistoryEntry.MODE_PHOTO,
+            model = usage?.model,
+            inputTokens = usage?.inputTokens ?: 0L,
+            outputTokens = usage?.outputTokens ?: 0L,
+            cacheReadTokens = usage?.cacheReadTokens ?: 0L,
+            cacheWriteTokens = usage?.cacheWriteTokens ?: 0L,
+            requests = usage?.requests ?: 0,
+            costUsd = usage?.costUsd ?: 0.0,
+            notes = notes.toList(),
+        )
+        try {
+            HistoryStore.add(entry)
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not add the history entry", e)
+        }
+        return kept
     }
 
     /** The version 1 route: one image per page, with an invisible text layer. */

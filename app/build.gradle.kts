@@ -12,8 +12,14 @@ android {
         applicationId = "com.aiden.screentopdf"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.1"
+        versionCode = 5
+        versionName = "0.4.0"
+
+        // Only the processor types we use: arm64 phones and the x86_64 emulator.
+        // This leaves out 2 older types and makes the app about half the size.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     // One fixed debug key, so every GitHub build can update the app already on the phone.

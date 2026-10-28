@@ -119,12 +119,25 @@ data class PageSetup(
     val lineSpacing: Float = 1.15f,
 )
 
+/** What one Claude read used, and what it cost in US dollars (estimated from list prices). */
+data class UsageCost(
+    val model: String,
+    val inputTokens: Long,
+    val outputTokens: Long,
+    val cacheReadTokens: Long,
+    val cacheWriteTokens: Long,
+    val requests: Int,
+    val costUsd: Double,
+)
+
 data class RebuiltDocument(
     val title: String,
     val setup: PageSetup,
     val blocks: List<DocBlock>,
     /** Short notes from the reader, such as "page 3 was blurred, 2 words guessed". Shown to the user. */
     val warnings: List<String> = emptyList(),
+    /** Tokens and cost of the Claude requests that made this document. */
+    val usage: UsageCost? = null,
 )
 
 /** Reads frames with Claude and returns the rebuilt document. Owned by the ai package. */

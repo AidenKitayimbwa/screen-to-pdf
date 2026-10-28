@@ -11,6 +11,24 @@
     <string name="home_no_key_title">Add your Claude API key to get clean, rebuilt documents</string>
     <string name="home_no_key_body">Without a key the app makes a photo copy of the screen.</string>
     <string name="home_no_key_button">Open settings</string>
+    <string name="home_history">History</string>
+
+    <!-- History -->
+    <string name="history_title">History</string>
+    <string name="history_back">Back</string>
+    <string name="history_summary_pdfs">PDFs made</string>
+    <string name="history_summary_spent">Total spent</string>
+    <string name="history_summary_tokens">Total tokens</string>
+    <string name="history_rebuilt">Rebuilt by Claude</string>
+    <string name="history_photo">Photo copy</string>
+    <string name="history_file_missing">File missing</string>
+    <string name="history_delete">Delete</string>
+    <string name="history_delete_title">Delete this PDF?</string>
+    <string name="history_delete_body">This removes the PDF from the app. It cannot be undone.</string>
+    <string name="history_cancel">Cancel</string>
+    <string name="history_empty">No PDFs yet. Your PDFs and what they cost will show here.</string>
+    <string name="history_estimate_note">Costs are estimates from Anthropic list prices. Runs that you cancel are not counted, but Anthropic may still charge for them. Check console.anthropic.com for your exact bill.</string>
+    <string name="history_less_than_cent">less than US$0.01</string>
 
     <!-- Settings -->
     <string name="settings_title">Settings</string>

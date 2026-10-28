@@ -2,6 +2,7 @@ package com.aiden.screentopdf
 
 import android.app.Application
 import com.aiden.screentopdf.ai.AiModule
+import com.aiden.screentopdf.history.HistoryStore
 import com.aiden.screentopdf.pdf.PdfModule
 import com.aiden.screentopdf.processing.ProcessingModule
 import com.aiden.screentopdf.render.RenderModule
@@ -14,5 +15,6 @@ class ScreenToPdfApp : Application() {
         PdfModule.install()
         AiModule.install(this)
         RenderModule.install()
+        HistoryStore.init(this)
     }
 }

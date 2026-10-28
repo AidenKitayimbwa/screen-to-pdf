@@ -12,6 +12,7 @@ import androidx.navigation.navArgument
 object Routes {
     const val HOME = "home"
     const val SETTINGS = "settings"
+    const val HISTORY = "history"
     const val CAPTURE = "capture"
     const val PROCESSING = "processing/{videoUriEncoded}"
     const val RESULT = "result/{pdfPathEncoded}"
@@ -32,10 +33,21 @@ fun AppNav() {
                     navController.navigate(Routes.processing(uri))
                 },
                 onSettings = { navController.navigate(Routes.SETTINGS) },
+                onHistory = { navController.navigate(Routes.HISTORY) },
             )
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(
+                onBack = { navController.popBackStack() },
+            )
+        }
+        composable(Routes.HISTORY) {
+            HistoryScreen(
+                onOpen = { entry ->
+                    // The result screen reads its notes from here, so set them before it opens.
+                    ResultNotes.lines = entry.notes
+                    navController.navigate(Routes.result(entry.pdfPath))
+                },
                 onBack = { navController.popBackStack() },
             )
         }
