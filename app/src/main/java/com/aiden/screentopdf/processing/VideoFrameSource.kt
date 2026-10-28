@@ -26,7 +26,8 @@ import kotlin.math.sqrt
  *    the one before it. This covers web pages that scroll without a pause.
  *
  * It then drops frames that look the same as the one before, caps the total at
- * [MAX_FRAMES], and fetches the kept frames at full size. No OpenCV needed.
+ * [MAX_FRAMES], and fetches the kept frames at up to [FULL_SIZE] pixels on the
+ * long side. No OpenCV needed.
  */
 class VideoFrameSource : FrameSource {
 
@@ -129,7 +130,7 @@ class VideoFrameSource : FrameSource {
                 }
                 chosen = capFrames(chosen, stillTimes)
 
-                // Step 4: fetch each chosen frame at full size.
+                // Step 4: fetch each chosen frame at reading size.
                 val pages = ArrayList<CapturedPage>()
                 chosen.forEachIndexed { index, sample ->
                     ensureActive()
@@ -181,18 +182,49 @@ class VideoFrameSource : FrameSource {
         null
     }
 
-    /** Gets a full-size ARGB_8888 frame at the given time. */
+    /**
+     * Gets an ARGB_8888 frame at the given time, with the long side at most
+     * [FULL_SIZE] pixels. Smaller frames keep their size. This keeps memory low:
+     * a 4K frame is 33 MB, a 2000 px one is under 9 MB.
+     */
     private fun readFullFrame(retriever: MediaMetadataRetriever, timeUs: Long): Bitmap? = try {
-        val frame = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-        if (frame == null || frame.config == Bitmap.Config.ARGB_8888) {
-            frame
+        val frame = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            // Scales down to fit FULL_SIZE x FULL_SIZE, keeping the shape. Never scales up.
+            retriever.getScaledFrameAtTime(
+                timeUs,
+                MediaMetadataRetriever.OPTION_CLOSEST,
+                FULL_SIZE,
+                FULL_SIZE,
+            )
         } else {
-            val copy = frame.copy(Bitmap.Config.ARGB_8888, false)
-            frame.recycle()
-            copy
+            retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+        }
+        if (frame == null) {
+            null
+        } else {
+            val limited = limitSize(frame, FULL_SIZE)
+            if (limited.config == Bitmap.Config.ARGB_8888) {
+                limited
+            } else {
+                val copy = limited.copy(Bitmap.Config.ARGB_8888, false)
+                limited.recycle()
+                copy
+            }
         }
     } catch (t: Throwable) {
         null
+    }
+
+    /** Shrinks the bitmap so its long side is at most [maxSide]. Recycles the original if it shrinks. */
+    private fun limitSize(bitmap: Bitmap, maxSide: Int): Bitmap {
+        val longSide = max(bitmap.width, bitmap.height)
+        if (longSide <= maxSide) return bitmap
+        val scale = maxSide.toFloat() / longSide
+        val w = max(1, (bitmap.width * scale).roundToInt())
+        val h = max(1, (bitmap.height * scale).roundToInt())
+        val small = Bitmap.createScaledBitmap(bitmap, w, h, true)
+        if (small !== bitmap) bitmap.recycle()
+        return small
     }
 
     /**
@@ -480,7 +512,10 @@ class VideoFrameSource : FrameSource {
         const val MIN_STD_DEV = 8.0
         const val FALLBACK_WINDOW_MS = 1500L
         const val READ_SHARE = 0.85f
-        const val MAX_FRAMES = 60
+        /** Most frames kept. More than this risks running out of memory on small phones. */
+        const val MAX_FRAMES = 36
+        /** Longest side of a fetched frame, in pixels. */
+        const val FULL_SIZE = 2000
 
         /** Keep a scrolling frame once the screen has moved this share of its height. */
         const val MAX_SCROLL = 0.5

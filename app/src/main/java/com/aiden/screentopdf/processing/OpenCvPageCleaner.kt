@@ -319,7 +319,8 @@ class OpenCvPageCleaner : PageCleaner {
 
     private companion object {
         const val DETECT_SIZE = 800.0
-        const val MAX_OUTPUT = 2400.0
+        /** Long side of the output in pixels. Kept small so pages fit in memory. */
+        const val MAX_OUTPUT = 2000.0
         const val MIN_AREA_SHARE = 0.15
         const val MIN_ASPECT = 0.4
         const val MAX_ASPECT = 2.6

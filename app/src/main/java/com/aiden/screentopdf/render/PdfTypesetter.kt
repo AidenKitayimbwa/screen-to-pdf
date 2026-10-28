@@ -62,11 +62,12 @@ class PdfTypesetter : DocumentRenderer {
 // Spacing constants, all in points.
 private const val INDENT_STEP = 18f
 private const val MARKER_GAP = 5f
+/** Space added to the widest marker in a list to get the marker column width. */
+private const val MARKER_COLUMN_EXTRA = 7f
 private const val CELL_PAD = 4f
 private const val RULE_GAP = 6f
 private const val CAPTION_GAP = 4f
 private const val LINK_COLOUR = 0xFF1155CC.toInt()
-private const val HEADER_FILL = 0xFFF2F2F2.toInt()
 private const val GRID_COLOUR = 0xFF808080.toInt()
 private const val RULE_COLOUR = 0xFF999999.toInt()
 
@@ -188,6 +189,12 @@ private class TypesetJob(
         strokeWidth = 0.75f
         color = RULE_COLOUR
     }
+    /** Slightly heavier line under header rows when a table has no grid lines. */
+    private val headerLinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 0.75f
+        color = GRID_COLOUR
+    }
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
         isFilterBitmap = true
     }
@@ -195,13 +202,14 @@ private class TypesetJob(
     fun run() {
         val blocks = doc.blocks
         val total = blocks.size.coerceAtLeast(1)
+        val listColumns = listColumns(blocks)
         cursor.ensurePage()
         blocks.forEachIndexed { i, block ->
             val next = blocks.getOrNull(i + 1)
             when (block) {
                 is DocBlock.Heading -> drawHeading(block)
                 is DocBlock.Paragraph -> drawParagraph(block)
-                is DocBlock.ListItem -> drawListItem(block, next)
+                is DocBlock.ListItem -> drawListItem(block, next, listColumns[i])
                 is DocBlock.Table -> drawTable(block)
                 is DocBlock.Image -> drawImage(block)
                 is DocBlock.Rule -> drawRule()
@@ -246,13 +254,41 @@ private class TypesetJob(
         cursor.gap(0.6f * m.lineHeightFor(size))
     }
 
-    private fun drawListItem(block: DocBlock.ListItem, next: DocBlock?) {
+    /**
+     * Marker column width for each block, by block index (0 for non-list blocks).
+     * Items in one run of list items share a width per level, so "9." and "10." line up.
+     */
+    private fun listColumns(blocks: List<DocBlock>): FloatArray {
+        val paint = textPaint(m.bodySize)
+        val columns = FloatArray(blocks.size)
+        var i = 0
+        while (i < blocks.size) {
+            if (blocks[i] !is DocBlock.ListItem) {
+                i++
+                continue
+            }
+            var end = i
+            while (end < blocks.size && blocks[end] is DocBlock.ListItem) end++
+            val widest = HashMap<Int, Float>()
+            for (j in i until end) {
+                val item = blocks[j] as DocBlock.ListItem
+                val w = paint.measureText(item.marker)
+                widest[item.level] = max(widest[item.level] ?: 0f, w)
+            }
+            for (j in i until end) {
+                val item = blocks[j] as DocBlock.ListItem
+                columns[j] = max(INDENT_STEP, (widest[item.level] ?: 0f) + MARKER_COLUMN_EXTRA)
+            }
+            i = end
+        }
+        return columns
+    }
+
+    private fun drawListItem(block: DocBlock.ListItem, next: DocBlock?, column: Float) {
         val paint = textPaint(m.bodySize)
         val marker = block.marker
         val markerWidth = paint.measureText(marker)
         val indent = m.margin + block.level.coerceIn(0, 8) * INDENT_STEP
-        // The marker column is at least one indent step, wider for long numbers.
-        val column = max(INDENT_STEP, markerWidth + MARKER_GAP + 2f)
         val textX = indent + column
         val width = m.textWidth - (textX - m.margin)
         val layout = buildLayout(spannable(block.runs), paint, width, Align.LEFT)
@@ -336,17 +372,45 @@ private class TypesetJob(
         val widths = columnWidths(table.columnWidths, colCount)
         val rows = table.rows.map { measureRow(it, widths, colCount) }
         val headerRows = rows.takeWhile { it.header }
+        val headerHeight = headerRows.sumOf { it.height.toDouble() }.toFloat()
+        // Header rows repeat on later pages only when they leave room for body rows.
+        val repeatHeaders = headerRows.isNotEmpty() && headerHeight <= m.textHeight / 2f
+        val minSlice = m.bodyLine + 2 * CELL_PAD
 
         cursor.flushGap()
+        // Keep with previous: the header rows and first body row stay together, so a
+        // heading or caption above the table is not left alone at the foot of a page.
+        val firstBody = rows.getOrNull(headerRows.size)
+        cursor.ensureSpace(min(headerHeight + (firstBody?.height ?: 0f), m.textHeight))
+
         rows.forEachIndexed { i, row ->
-            if (row.height > cursor.remaining && !cursor.isPageEmpty) {
-                cursor.newPage()
-                // Repeat the header rows at the top of the new page.
-                if (i >= headerRows.size) headerRows.forEach { drawRow(it, table.gridLines) }
+            val body = i >= headerRows.size
+            val tall = row.height > m.textHeight
+            // A tall row is sliced across pages, so it only needs room for one slice.
+            val needed = if (tall) minSlice else row.height
+            var fresh = cursor.isPageEmpty
+            if (needed > cursor.remaining && !fresh) {
+                continueOnNewPage(headerRows, body && repeatHeaders, table.gridLines)
+                fresh = true
             }
-            drawRow(row, table.gridLines)
+            val next = IntArray(row.cells.size)
+            // Each pass draws what fits. On a fresh page every unfinished cell draws at
+            // least one line, so the loop always moves forward.
+            while (!drawRowSlice(row, next, table.gridLines, force = fresh)) {
+                continueOnNewPage(headerRows, body && repeatHeaders, table.gridLines)
+                fresh = true
+            }
         }
         cursor.gap(0.6f * m.bodyLine)
+    }
+
+    /** Starts a new page and repeats the header rows when [withHeaders] is true. */
+    private fun continueOnNewPage(headerRows: List<RowBox>, withHeaders: Boolean, gridLines: Boolean) {
+        cursor.newPage()
+        if (!withHeaders) return
+        for (header in headerRows) {
+            drawRowSlice(header, IntArray(header.cells.size), gridLines, force = true)
+        }
     }
 
     private fun columnWidths(given: List<Float>, colCount: Int): List<Float> {
@@ -366,7 +430,8 @@ private class TypesetJob(
             val width = widths.subList(col, col + span).sum()
             val paint = textPaint(m.bodySize, bold = row.header)
             val layout = buildLayout(spannable(cell.runs), paint, width - 2 * CELL_PAD, cell.align)
-            val fill = parseColour(cell.fill) ?: if (row.header) HEADER_FILL else null
+            // Only the fill the model gives; header rows get no default grey.
+            val fill = parseColour(cell.fill)
             cells += CellBox(layout, left, width, fill)
             left += width
             col += span
@@ -375,32 +440,63 @@ private class TypesetJob(
         return RowBox(cells, height, row.header)
     }
 
-    private fun drawRow(row: RowBox, gridLines: Boolean) {
+    /**
+     * Draws one slice of [row] on the current page, starting each cell at the line in [next].
+     * Updates [next] to where each cell stopped. With [force], every unfinished cell draws at
+     * least one line even if it does not fit. Returns true when every cell is finished.
+     */
+    private fun drawRowSlice(row: RowBox, next: IntArray, gridLines: Boolean, force: Boolean): Boolean {
         cursor.ensurePage()
+        val textRoom = cursor.remaining - 2 * CELL_PAD
+        val ends = IntArray(row.cells.size)
+        var textHeight = 0f
+        row.cells.forEachIndexed { c, cell ->
+            val layout = cell.layout
+            val start = next[c].coerceAtMost(layout.lineCount)
+            var end = if (start < layout.lineCount) lastLineThatFits(layout, start, textRoom) else start
+            if (end == start && start < layout.lineCount && force) end = start + 1
+            ends[c] = end
+            if (end > start) {
+                val h = (layout.getLineBottom(end - 1) - layout.getLineTop(start)).toFloat()
+                textHeight = max(textHeight, h)
+            }
+        }
+        val finished = row.cells.indices.all { ends[it] >= row.cells[it].layout.lineCount }
+        // Nothing fits here and nothing is forced: let the caller start a new page.
+        if (!finished && textHeight <= 0f) return false
+
         val top = cursor.y
-        val drawHeight = min(row.height, cursor.remaining)
+        val height = min(textHeight + 2 * CELL_PAD, cursor.remaining)
         val canvas = cursor.canvas
-        canvas.save()
-        // A row taller than the page is clipped to the page.
-        canvas.clipRect(m.margin - 1f, top - 1f, m.margin + m.textWidth + 1f, m.pageHeight - m.margin + 1f)
-        for (cell in row.cells) {
+        row.cells.forEachIndexed { c, cell ->
             val right = cell.left + cell.width
             cell.fill?.let {
                 fillPaint.color = it
-                canvas.drawRect(cell.left, top, right, top + row.height, fillPaint)
+                canvas.drawRect(cell.left, top, right, top + height, fillPaint)
             }
-            canvas.save()
-            canvas.translate(cell.left + CELL_PAD, top + CELL_PAD)
-            cell.layout.draw(canvas)
-            canvas.restore()
-            if (gridLines) canvas.drawRect(cell.left, top, right, top + row.height, gridPaint)
+            val start = next[c].coerceAtMost(cell.layout.lineCount)
+            val end = ends[c]
+            if (end > start) {
+                val lineTop = cell.layout.getLineTop(start).toFloat()
+                val lineBottom = cell.layout.getLineBottom(end - 1).toFloat()
+                val textTop = top + CELL_PAD
+                val textBottom = min(textTop + (lineBottom - lineTop), top + height)
+                canvas.save()
+                // Clip to the lines of this slice so earlier and later lines stay hidden.
+                canvas.clipRect(cell.left, textTop, right, textBottom)
+                canvas.translate(cell.left + CELL_PAD, textTop - lineTop)
+                cell.layout.draw(canvas)
+                canvas.restore()
+            }
+            if (gridLines) canvas.drawRect(cell.left, top, right, top + height, gridPaint)
+            next[c] = end
         }
-        if (!gridLines && row.header) {
-            val y = top + row.height
-            canvas.drawLine(m.margin, y, m.margin + m.textWidth, y, gridPaint)
+        if (finished && !gridLines && row.header) {
+            val y = top + height
+            canvas.drawLine(m.margin, y, m.margin + m.textWidth, y, headerLinePaint)
         }
-        canvas.restore()
-        cursor.advance(drawHeight)
+        cursor.advance(height)
+        return finished
     }
 
     // ---- Text helpers -------------------------------------------------------

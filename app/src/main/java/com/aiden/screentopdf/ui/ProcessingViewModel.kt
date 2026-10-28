@@ -62,13 +62,21 @@ class ProcessingViewModel : ViewModel() {
     private var started = false
     private var delivered = false
 
+    /**
+     * Number of the current run. Each start or retry gets a new number.
+     * Progress from an older, cancelled run is ignored so it cannot overwrite a new run.
+     */
+    @Volatile
+    private var runId = 0
+
     /** Starts the work. Calling it again (for example after a screen rotation) does nothing. */
     fun start(context: Context, uri: Uri) {
         if (started) return
         started = true
         val appContext = context.applicationContext
+        val id = ++runId
         job = viewModelScope.launch(Dispatchers.Default) {
-            runPipeline(appContext, uri)
+            runPipeline(appContext, uri, id)
         }
     }
 
@@ -76,6 +84,7 @@ class ProcessingViewModel : ViewModel() {
     fun retry(context: Context, uri: Uri) {
         job?.cancel()
         job = null
+        runId++
         started = false
         delivered = false
         _state.value = UiState()
@@ -85,6 +94,7 @@ class ProcessingViewModel : ViewModel() {
     fun cancel() {
         job?.cancel()
         job = null
+        runId++
     }
 
     /** Returns true only the first time it is called after a success, so the screen moves on once. */
@@ -94,37 +104,38 @@ class ProcessingViewModel : ViewModel() {
         return true
     }
 
-    private suspend fun runPipeline(context: Context, uri: Uri) {
+    private suspend fun runPipeline(context: Context, uri: Uri, id: Int) {
         try {
             // Part 1: find the still pages in the video.
-            setProgress(0f, Stage.FINDING, "Finding pages in the video")
+            setProgress(id, 0f, Stage.FINDING, "Finding pages in the video")
             val pages = Pipeline.frameSource.extractPages(uri) { fraction, status ->
-                setProgress(FIND_END * fraction.coerceIn(0f, 1f), Stage.FINDING, status)
-            }
+                setProgress(id, FIND_END * fraction.coerceIn(0f, 1f), Stage.FINDING, status)
+            }.toMutableList()
             coroutineContext.ensureActive()
             if (pages.isEmpty()) {
-                _state.update {
+                updateState(id) {
                     it.copy(error = "No still pages found. Scroll more slowly and pause on each page.")
                 }
                 return
             }
 
-            // Part 2: clean each frame. The cleaner may recycle the input bitmap,
-            // so from here on only the cleaned list is used.
+            // Part 2: clean each frame and replace it in the list straight away.
+            // The original bitmap is then unreferenced and can be freed, so the
+            // app never holds both the raw and the cleaned pages at once.
             val total = pages.size
-            val cleaned = ArrayList<CapturedPage>(total)
             val cleanSpan = CLEAN_END - FIND_END
-            pages.forEachIndexed { index, page ->
+            for (index in pages.indices) {
                 coroutineContext.ensureActive()
                 setProgress(
+                    id,
                     FIND_END + cleanSpan * index / total,
                     Stage.CLEANING,
                     "Cleaning frame ${index + 1} of $total",
                 )
-                val clean = Pipeline.pageCleaner.clean(page)
-                cleaned += clean
+                val clean = Pipeline.pageCleaner.clean(pages[index])
+                pages[index] = clean
                 val thumbnail = makeThumbnail(clean.bitmap)
-                _state.update {
+                updateState(id) {
                     it.copy(
                         progress = FIND_END + cleanSpan * (index + 1) / total,
                         thumbnails = if (thumbnail != null) it.thumbnails + thumbnail else it.thumbnails,
@@ -139,17 +150,17 @@ class ProcessingViewModel : ViewModel() {
             // Part 3: ask Claude to rebuild the document, or fall back to a photo copy.
             val notes = ArrayList<String>()
             val rebuilt: File? = if (Pipeline.documentReader.isReady()) {
-                rebuildDocument(cleaned, outFile, notes)
+                rebuildDocument(id, pages, outFile, notes)
             } else {
                 notes += "No API key saved, so this is a photo copy. " +
                     "Add a key in Settings for a rebuilt document."
                 null
             }
-            val pdf: File = rebuilt ?: buildPhotoCopy(cleaned, outFile)
+            val pdf: File = rebuilt ?: buildPhotoCopy(id, pages, outFile)
             coroutineContext.ensureActive()
 
-            ResultNotes.lines = notes
-            _state.update {
+            if (id == runId) ResultNotes.lines = notes
+            updateState(id) {
                 it.copy(
                     progress = 1f,
                     stage = Stage.BUILDING,
@@ -161,9 +172,12 @@ class ProcessingViewModel : ViewModel() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            // A cancelled run must never show an error. If the job was cancelled
+            // while a step was failing, this throws the CancellationException instead.
+            coroutineContext.ensureActive()
             Log.e(TAG, "Processing failed", e)
             val detail = e.message?.takeIf { it.isNotBlank() }
-            _state.update {
+            updateState(id) {
                 it.copy(
                     error = if (detail != null) {
                         "Could not make the PDF. $detail"
@@ -180,14 +194,16 @@ class ProcessingViewModel : ViewModel() {
      * Returns null, and adds a note, when the rebuilt route fails for a reason other than cancel.
      */
     private suspend fun rebuildDocument(
+        id: Int,
         cleaned: List<CapturedPage>,
         outFile: File,
         notes: MutableList<String>,
     ): File? {
         val doc: RebuiltDocument = try {
-            setProgress(CLEAN_END, Stage.READING, "Sending the pages to Claude")
+            setProgress(id, CLEAN_END, Stage.READING, "Sending the pages to Claude")
             Pipeline.documentReader.read(cleaned) { fraction, status ->
                 setProgress(
+                    id,
                     CLEAN_END + (READ_END - CLEAN_END) * fraction.coerceIn(0f, 1f),
                     Stage.READING,
                     status,
@@ -196,6 +212,7 @@ class ProcessingViewModel : ViewModel() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            coroutineContext.ensureActive()
             Log.e(TAG, "Claude could not read the document", e)
             notes += "Claude could not read the document: ${shortMessage(e)}. " +
                 "This is a photo copy instead."
@@ -205,14 +222,15 @@ class ProcessingViewModel : ViewModel() {
         notes += doc.warnings
 
         return try {
-            setProgress(READ_END, Stage.BUILDING, "Typesetting the document")
+            setProgress(id, READ_END, Stage.BUILDING, "Typesetting the document")
             val pdf = Pipeline.documentRenderer.render(doc, outFile) { fraction, status ->
-                setProgress(READ_END + (1f - READ_END) * fraction.coerceIn(0f, 1f), Stage.BUILDING, status)
+                setProgress(id, READ_END + (1f - READ_END) * fraction.coerceIn(0f, 1f), Stage.BUILDING, status)
             }
             pdf
         } catch (e: CancellationException) {
             throw e
         } catch (e: Throwable) {
+            coroutineContext.ensureActive()
             Log.e(TAG, "Could not typeset the document", e)
             notes += "Could not build the rebuilt document: ${shortMessage(e)}. " +
                 "This is a photo copy instead."
@@ -221,16 +239,22 @@ class ProcessingViewModel : ViewModel() {
     }
 
     /** The version 1 route: one image per page, with an invisible text layer. */
-    private suspend fun buildPhotoCopy(cleaned: List<CapturedPage>, outFile: File): File {
-        setProgress(READ_END, Stage.BUILDING, "Building the PDF")
+    private suspend fun buildPhotoCopy(id: Int, cleaned: List<CapturedPage>, outFile: File): File {
+        setProgress(id, READ_END, Stage.BUILDING, "Building the PDF")
         if (outFile.exists()) outFile.delete()
         return Pipeline.pdfBuilder.build(cleaned, outFile, true) { fraction, status ->
-            setProgress(READ_END + (1f - READ_END) * fraction.coerceIn(0f, 1f), Stage.BUILDING, status)
+            setProgress(id, READ_END + (1f - READ_END) * fraction.coerceIn(0f, 1f), Stage.BUILDING, status)
         }
     }
 
-    private fun setProgress(progress: Float, stage: Stage, status: String) {
-        _state.update { it.copy(progress = progress, stage = stage, status = status) }
+    /** Changes the screen state only while [id] is still the current run. */
+    private inline fun updateState(id: Int, change: (UiState) -> UiState) {
+        if (id != runId) return
+        _state.update(change)
+    }
+
+    private fun setProgress(id: Int, progress: Float, stage: Stage, status: String) {
+        updateState(id) { it.copy(progress = progress, stage = stage, status = status) }
     }
 
     private fun shortMessage(e: Throwable): String {

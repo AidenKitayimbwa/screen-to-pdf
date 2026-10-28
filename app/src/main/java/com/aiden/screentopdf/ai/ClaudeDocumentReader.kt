@@ -18,6 +18,8 @@ import com.anthropic.core.JsonValue
 import com.anthropic.errors.AnthropicIoException
 import com.anthropic.errors.AnthropicServiceException
 import com.anthropic.errors.BadRequestException
+import com.anthropic.errors.NotFoundException
+import com.anthropic.errors.PermissionDeniedException
 import com.anthropic.errors.RateLimitException
 import com.anthropic.errors.UnauthorizedException
 import com.anthropic.models.messages.Base64ImageSource
@@ -34,7 +36,12 @@ import java.io.ByteArrayOutputStream
 import java.time.Duration
 import java.util.ArrayDeque
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONException
@@ -64,7 +71,7 @@ class ClaudeDocumentReader : DocumentReader {
 
             val client: AnthropicClient = AnthropicOkHttpClient.builder()
                 .apiKey(apiKey)
-                .timeout(Duration.ofMinutes(10))
+                .timeout(Duration.ofMinutes(15))
                 .maxRetries(0)
                 .build()
             try {
@@ -82,7 +89,7 @@ class ClaudeDocumentReader : DocumentReader {
     // Batching
     // ---------------------------------------------------------------------
 
-    private fun readWithClient(
+    private suspend fun readWithClient(
         client: AnthropicClient,
         model: String,
         frames: List<CapturedPage>,
@@ -102,6 +109,8 @@ class ClaudeDocumentReader : DocumentReader {
         var batchNumber = 0
 
         while (work.isNotEmpty()) {
+            // Stop before the next paid request if the user has cancelled.
+            currentCoroutineContext().ensureActive()
             val indices = work.removeFirst()
             batchNumber++
             val total = maxOf(plannedBatches, batchNumber + work.size)
@@ -110,7 +119,7 @@ class ClaudeDocumentReader : DocumentReader {
 
             val contextText = if (merged.isEmpty()) null else plainText(merged).takeLast(CONTEXT_CHARS)
             val params = buildParams(model, frames, indices, contextText)
-            val response = callWithRetries(client, params)
+            val response = callWithRetries(client, model, params)
 
             inputTokens += response.usage().inputTokens()
             outputTokens += response.usage().outputTokens()
@@ -178,6 +187,8 @@ class ClaudeDocumentReader : DocumentReader {
                         "<already_transcribed>\n$contextText\n</already_transcribed>\n\n" +
                         "Continue the document from where this ends. Do not repeat any content that is already transcribed. " +
                         "The new frames overlap with the earlier ones, so skip the part you have already seen. " +
+                        "If the text so far ends inside a table, continue it as a table block that holds only the rows " +
+                        "not yet listed, with no header row. " +
                         "Give the same title and page setup as before.",
                 ),
             )
@@ -240,7 +251,7 @@ class ClaudeDocumentReader : DocumentReader {
                 .build(),
         )
 
-    /** Downscales so the long side is at most [MAX_IMAGE_SIDE] px, then JPEG at quality 88, Base64 with no line breaks. */
+    /** Downscales so the long side is at most [MAX_IMAGE_SIDE] px, then JPEG at [JPEG_QUALITY], Base64 with no line breaks. */
     private fun encodeJpegBase64(source: Bitmap): String {
         val longSide = maxOf(source.width, source.height)
         val scaled = if (longSide > MAX_IMAGE_SIDE) {
@@ -261,47 +272,52 @@ class ClaudeDocumentReader : DocumentReader {
     // Calling the API with retries
     // ---------------------------------------------------------------------
 
-    private fun callWithRetries(client: AnthropicClient, params: MessageCreateParams): Message {
+    /**
+     * Calls the API with a short retry policy. Cancelling the coroutine interrupts the
+     * blocking HTTP call and stops any retry, so no further paid requests are sent.
+     */
+    private suspend fun callWithRetries(client: AnthropicClient, model: String, params: MessageCreateParams): Message {
         var rateLimitRetried = false
         var serviceAttempts = 0
         while (true) {
+            currentCoroutineContext().ensureActive()
             try {
-                return client.messages().create(params)
+                return runInterruptible(Dispatchers.IO) { client.messages().create(params) }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: UnauthorizedException) {
                 throw DocumentReadException("The API key is not valid. Check it in Settings.", e)
             } catch (e: BadRequestException) {
                 throw DocumentReadException("Claude rejected the request: ${e.message ?: "bad request"}", e)
+            } catch (e: NotFoundException) {
+                throw DocumentReadException("The model $model is not available with this key. Pick another model in Settings.", e)
+            } catch (e: PermissionDeniedException) {
+                throw DocumentReadException(
+                    "This API key is not allowed to use $model. Check your Anthropic account or pick another model in Settings.",
+                    e,
+                )
             } catch (e: RateLimitException) {
                 if (rateLimitRetried) {
                     throw DocumentReadException("Claude is busy (rate limit). Wait a minute and try again.", e)
                 }
                 rateLimitRetried = true
                 Log.w(TAG, "Rate limited, waiting before one retry", e)
-                sleep(RATE_LIMIT_WAIT_MS)
+                delay(RATE_LIMIT_WAIT_MS)
             } catch (e: AnthropicServiceException) {
                 serviceAttempts++
                 if (serviceAttempts > SERVICE_RETRIES) {
                     throw DocumentReadException("Claude's service had a problem. Please try again later.", e)
                 }
                 Log.w(TAG, "Service error, retry $serviceAttempts", e)
-                sleep(BACKOFF_MS * serviceAttempts)
+                delay(BACKOFF_MS * serviceAttempts)
             } catch (e: AnthropicIoException) {
                 serviceAttempts++
                 if (serviceAttempts > SERVICE_RETRIES) {
                     throw DocumentReadException("Could not reach Claude. Check your internet connection and try again.", e)
                 }
                 Log.w(TAG, "Network error, retry $serviceAttempts", e)
-                sleep(BACKOFF_MS * serviceAttempts)
+                delay(BACKOFF_MS * serviceAttempts)
             }
-        }
-    }
-
-    private fun sleep(ms: Long) {
-        try {
-            Thread.sleep(ms)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw DocumentReadException("Reading was cancelled.", e)
         }
     }
 
@@ -373,6 +389,8 @@ class ClaudeDocumentReader : DocumentReader {
 
     private fun similar(a: String, b: String): Boolean {
         if (a == b) return true
+        // Short strings such as "Total" or "Yes" must match exactly, or real rows get dropped.
+        if (a.length < 20 || b.length < 20) return false
         val shorter = if (a.length <= b.length) a else b
         val longer = if (a.length <= b.length) b else a
         if (shorter.length >= 20 && longer.contains(shorter)) return true
@@ -650,7 +668,7 @@ class ClaudeDocumentReader : DocumentReader {
         private const val BATCH_SIZE = 6
         private const val MAX_TOKENS = 32000L
         private const val MAX_IMAGE_SIDE = 2000
-        private const val JPEG_QUALITY = 88
+        private const val JPEG_QUALITY = 80
         private const val CONTEXT_CHARS = 1500
         private const val DUPLICATE_WINDOW = 3
         private const val MIN_CROP_PX = 8
@@ -712,26 +730,72 @@ class ClaudeDocumentReader : DocumentReader {
             ),
         )
 
-        private val BLOCK_SCHEMA: Map<String, Any> = obj(
+        /** A single-value enum that fixes the block type for one branch of the schema. */
+        private fun typeTag(name: String): Map<String, Any> = mapOf("type" to "string", "enum" to listOf(name))
+
+        private val HEADING_SCHEMA: Map<String, Any> = obj(
             mapOf(
-                "type" to mapOf(
-                    "type" to "string",
-                    "enum" to listOf("heading", "paragraph", "list_item", "table", "image", "rule", "page_break"),
-                ),
+                "type" to typeTag("heading"),
                 "level" to mapOf("type" to "integer"),
+                "align" to ALIGN_SCHEMA,
+                "runs" to arraySchema(RUN_SCHEMA),
+            ),
+        )
+
+        private val PARAGRAPH_SCHEMA: Map<String, Any> = obj(
+            mapOf(
+                "type" to typeTag("paragraph"),
                 "align" to ALIGN_SCHEMA,
                 "sizeScale" to mapOf("type" to "number"),
                 "indentLevel" to mapOf("type" to "integer"),
+                "runs" to arraySchema(RUN_SCHEMA),
+            ),
+        )
+
+        private val LIST_ITEM_SCHEMA: Map<String, Any> = obj(
+            mapOf(
+                "type" to typeTag("list_item"),
                 "ordered" to mapOf("type" to "boolean"),
                 "marker" to mapOf("type" to "string"),
+                "indentLevel" to mapOf("type" to "integer"),
                 "runs" to arraySchema(RUN_SCHEMA),
+            ),
+        )
+
+        private val TABLE_SCHEMA: Map<String, Any> = obj(
+            mapOf(
+                "type" to typeTag("table"),
                 "rows" to arraySchema(ROW_SCHEMA),
                 "columnWidths" to arraySchema(mapOf("type" to "number")),
                 "gridLines" to mapOf("type" to "boolean"),
+            ),
+        )
+
+        private val IMAGE_SCHEMA: Map<String, Any> = obj(
+            mapOf(
+                "type" to typeTag("image"),
                 "frame" to mapOf("type" to "integer"),
                 "box" to BOX_SCHEMA,
                 "widthFraction" to mapOf("type" to "number"),
+                "align" to ALIGN_SCHEMA,
                 "caption" to arraySchema(RUN_SCHEMA),
+            ),
+        )
+
+        private val RULE_SCHEMA: Map<String, Any> = obj(mapOf("type" to typeTag("rule")))
+
+        private val PAGE_BREAK_SCHEMA: Map<String, Any> = obj(mapOf("type" to typeTag("page_break")))
+
+        /** Each block carries only the fields of its own kind. This keeps the reply short. */
+        private val BLOCK_SCHEMA: Map<String, Any> = mapOf(
+            "anyOf" to listOf(
+                HEADING_SCHEMA,
+                PARAGRAPH_SCHEMA,
+                LIST_ITEM_SCHEMA,
+                TABLE_SCHEMA,
+                IMAGE_SCHEMA,
+                RULE_SCHEMA,
+                PAGE_BREAK_SCHEMA,
             ),
         )
 
@@ -764,6 +828,7 @@ The images are frames from a phone video. The phone was pointed at a computer sc
 What to transcribe
 - Transcribe only the document's own content: its text, headings, lists, tables, pictures and page breaks.
 - Ignore everything that belongs to the viewer app, the browser or the computer: window title bars, menus, toolbars, ribbons, tabs, sidebars, thumbnail panels, page-number boxes, zoom controls, scroll bars, the mouse cursor, the taskbar, the dock, notifications, browser chrome, address bars, adverts, cookie banners, comment panels and the desktop.
+- Leave out running headers, footers and page numbers that repeat on every page of the document itself. Keep a header or footer that appears only once.
 - Copy the text exactly, word for word. Keep the original spelling, numbers, punctuation and capitalisation. Do not summarise, paraphrase, correct, expand, shorten or translate anything.
 - If a word cannot be read, give your best reading and add a short warning that says which word was unclear.
 
@@ -790,7 +855,14 @@ Overlap between frames
 - If you are given text that was already transcribed from earlier frames, continue from where it ends and do not repeat it.
 
 Filling the JSON
-- Every block has every field. For fields that do not apply to a block, use these neutral values: level 0, align "left", sizeScale 1, indentLevel 0, ordered false, marker "", runs [], rows [], columnWidths [], gridLines false, frame 0, box with all four values 0, widthFraction 1, caption [].
+- Each block type has its own fields and no others:
+  heading: type, level, align, runs.
+  paragraph: type, align, sizeScale, indentLevel, runs.
+  list_item: type, ordered, marker, indentLevel, runs.
+  table: type, rows, columnWidths, gridLines.
+  image: type, frame, box, widthFraction, align, caption.
+  rule and page_break: type only.
+- Use sizeScale 1 for normal body text. Use a larger or smaller number only when a paragraph is clearly a different size.
 - Set title to the document's own title if it has one, or a short name taken from its first heading.
 - Put short notes for the reader in warnings, such as unclear words or a page that was too blurred to read. Leave warnings empty when there is nothing to say.
         """.trimIndent()

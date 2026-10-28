@@ -54,6 +54,7 @@ class SimplePageCleaner : PageCleaner {
     }
 
     private companion object {
-        const val MAX_OUTPUT = 2400
+        /** Long side of the output in pixels. Kept small so pages fit in memory. */
+        const val MAX_OUTPUT = 2000
     }
 }
