@@ -106,7 +106,7 @@ class ClaudeDocumentReader : DocumentReader {
         frames.indices.chunked(BATCH_SIZE).forEach { work.addLast(it) }
         val plannedBatches = work.size
         var batchNumber = 0
-        val retriedBatches = HashSet<Int>()
+        val retriedBatches = HashSet<List<Int>>()
 
         while (work.isNotEmpty()) {
             // Stop before the next paid request if the user has cancelled.
@@ -145,7 +145,7 @@ class ClaudeDocumentReader : DocumentReader {
                     warnings.add("Frames ${indices.first()} to ${indices.last()} could not be read in full. Some content may be missing.")
                     continue
                 }
-                if (retriedBatches.add(indices.first())) {
+                if (retriedBatches.add(indices)) {
                     // The reply was not valid JSON. Ask once more for the same frames.
                     Log.w(TAG, "Reply was not valid JSON, retrying batch", e)
                     work.addFirst(indices)

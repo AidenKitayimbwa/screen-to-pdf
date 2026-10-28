@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
-import android.content.res.Configuration
 import android.net.Uri
 import android.provider.Settings
 import android.util.Log
@@ -55,6 +54,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,7 +71,6 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -247,6 +246,9 @@ private fun CameraRecorder(onRecorded: (Uri) -> Unit) {
 
     val prefs = remember { context.getSharedPreferences(CAPTURE_PREFS, Context.MODE_PRIVATE) }
     var corners by remember { mutableStateOf(loadCorners(prefs)) }
+    // Shape of the camera image as shown on screen (width divided by height). It starts as
+    // upright 16:9 and is replaced with the real shape once the camera is running.
+    var imageAspect by remember { mutableFloatStateOf(1f / IMAGE_ASPECT) }
 
     val cameraFailedText = stringResource(R.string.capture_camera_failed)
     val recordFailedText = stringResource(R.string.capture_record_failed)
@@ -278,6 +280,16 @@ private fun CameraRecorder(onRecorded: (Uri) -> Unit) {
                     preview,
                     videoCapture,
                 )
+                // Use the real shape of the image the camera gives, not the shape we asked for.
+                preview.resolutionInfo?.let { info ->
+                    val crop = info.cropRect
+                    val w = if (crop.width() > 0) crop.width() else info.resolution.width
+                    val h = if (crop.height() > 0) crop.height() else info.resolution.height
+                    if (w > 0 && h > 0) {
+                        val rotated = info.rotationDegrees % 180 != 0
+                        imageAspect = if (rotated) h.toFloat() / w else w.toFloat() / h
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Camera bind failed", e)
                 message = cameraFailedText
@@ -348,6 +360,7 @@ private fun CameraRecorder(onRecorded: (Uri) -> Unit) {
 
         DocumentFrameOverlay(
             corners = corners,
+            imageAspect = imageAspect,
             locked = isRecording,
             color = if (isRecording) RecordRed else Color.White,
             onCornersChanged = { corners = it },
@@ -418,26 +431,26 @@ private fun CameraRecorder(onRecorded: (Uri) -> Unit) {
 @Composable
 private fun DocumentFrameOverlay(
     corners: CornerFractions,
+    imageAspect: Float,
     locked: Boolean,
     color: Color,
     onCornersChanged: (CornerFractions) -> Unit,
     onEditFinished: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val isPortrait = LocalConfiguration.current.orientation == Configuration.ORIENTATION_PORTRAIT
     val currentCorners by rememberUpdatedState(corners)
     val currentOnChanged by rememberUpdatedState(onCornersChanged)
     val currentOnFinished by rememberUpdatedState(onEditFinished)
 
     Canvas(
-        modifier = modifier.pointerInput(locked, isPortrait) {
+        modifier = modifier.pointerInput(locked, imageAspect) {
             if (locked) return@pointerInput
             val touchRadius = HANDLE_TOUCH_RADIUS.toPx()
             // -1 means no drag, 0 to 3 means one corner, 4 means the whole frame.
             var dragTarget = -1
             detectDragGestures(
                 onDragStart = { position ->
-                    val rect = imageRect(Size(size.width.toFloat(), size.height.toFloat()), isPortrait)
+                    val rect = imageRect(Size(size.width.toFloat(), size.height.toFloat()), imageAspect)
                     val points = toPixels(currentCorners, rect)
                     val nearest = points.indices.minByOrNull { distance(points[it], position) } ?: -1
                     dragTarget = when {
@@ -457,7 +470,7 @@ private fun DocumentFrameOverlay(
                 onDrag = { change, dragAmount ->
                     if (dragTarget < 0) return@detectDragGestures
                     change.consume()
-                    val rect = imageRect(Size(size.width.toFloat(), size.height.toFloat()), isPortrait)
+                    val rect = imageRect(Size(size.width.toFloat(), size.height.toFloat()), imageAspect)
                     val points = toPixels(currentCorners, rect)
                     val moved = if (dragTarget == 4) {
                         moveAll(points, dragAmount, rect)
@@ -471,7 +484,7 @@ private fun DocumentFrameOverlay(
             )
         },
     ) {
-        val rect = imageRect(size, isPortrait)
+        val rect = imageRect(size, imageAspect)
         val points = toPixels(corners, rect)
 
         val quad = Path().apply {
@@ -501,12 +514,11 @@ private fun DocumentFrameOverlay(
 
 /**
  * The rectangle the camera image fills inside the view, with FIT_CENTER.
- * The image is 16:9, which is 9:16 when the phone is held upright. It is scaled to fit the
- * view and centred, so there may be black bars above and below or left and right.
+ * [aspect] is the image's width divided by its height as shown on screen. The image is scaled
+ * to fit the view and centred, so there may be black bars above and below or left and right.
  */
-private fun imageRect(viewSize: Size, isPortrait: Boolean): Rect {
-    if (viewSize.width <= 0f || viewSize.height <= 0f) return Rect(Offset.Zero, viewSize)
-    val aspect = if (isPortrait) 1f / IMAGE_ASPECT else IMAGE_ASPECT // width divided by height
+private fun imageRect(viewSize: Size, aspect: Float): Rect {
+    if (viewSize.width <= 0f || viewSize.height <= 0f || aspect <= 0f) return Rect(Offset.Zero, viewSize)
     var width = viewSize.width
     var height = width / aspect
     if (height > viewSize.height) {

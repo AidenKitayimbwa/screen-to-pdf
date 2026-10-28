@@ -239,12 +239,16 @@ class OpenCvPageCleaner : PageCleaner {
             (x.toDouble() * w).coerceIn(0.0, w),
             (y.toDouble() * h).coerceIn(0.0, h),
         )
-        return arrayOf(
+        val asPlaced = arrayOf(
             at(region.topLeftX, region.topLeftY),
             at(region.topRightX, region.topRightY),
             at(region.bottomRightX, region.bottomRightY),
             at(region.bottomLeftX, region.bottomLeftY),
         )
+        // If the user dragged corners past each other, sort them by position so the page
+        // is not mirrored. Keep the user's order when sorting cannot give 4 different corners.
+        val sorted = orderCorners(asPlaced)
+        return if (sorted.distinct().size == 4) sorted else asPlaced
     }
 
     private fun wholeFrame(mat: Mat): Array<Point> {
