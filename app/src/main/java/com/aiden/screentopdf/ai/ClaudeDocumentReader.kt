@@ -26,7 +26,6 @@ import com.anthropic.models.messages.Base64ImageSource
 import com.anthropic.models.messages.CacheControlEphemeral
 import com.anthropic.models.messages.ContentBlockParam
 import com.anthropic.models.messages.ImageBlockParam
-import com.anthropic.models.messages.JsonOutputFormat
 import com.anthropic.models.messages.Message
 import com.anthropic.models.messages.MessageCreateParams
 import com.anthropic.models.messages.OutputConfig
@@ -107,6 +106,7 @@ class ClaudeDocumentReader : DocumentReader {
         frames.indices.chunked(BATCH_SIZE).forEach { work.addLast(it) }
         val plannedBatches = work.size
         var batchNumber = 0
+        val retriedBatches = HashSet<Int>()
 
         while (work.isNotEmpty()) {
             // Stop before the next paid request if the user has cancelled.
@@ -139,10 +139,16 @@ class ClaudeDocumentReader : DocumentReader {
             onProgress((startFraction + 0.7f / total) * PROGRESS_READ_SHARE, "Reading the reply")
             val text = responseText(response)
             val json = try {
-                JSONObject(text)
+                JSONObject(extractJson(text))
             } catch (e: JSONException) {
                 if (stop == StopReason.MAX_TOKENS) {
                     warnings.add("Frames ${indices.first()} to ${indices.last()} could not be read in full. Some content may be missing.")
+                    continue
+                }
+                if (retriedBatches.add(indices.first())) {
+                    // The reply was not valid JSON. Ask once more for the same frames.
+                    Log.w(TAG, "Reply was not valid JSON, retrying batch", e)
+                    work.addFirst(indices)
                     continue
                 }
                 throw DocumentReadException("Claude's reply could not be understood. Please try again.", e)
@@ -223,7 +229,6 @@ class ClaudeDocumentReader : DocumentReader {
             .outputConfig(
                 OutputConfig.builder()
                     .effort(OutputConfig.Effort.MEDIUM)
-                    .format(JsonOutputFormat.builder().schema(outputSchema()).build())
                     .build(),
             )
 
@@ -424,6 +429,17 @@ class ClaudeDocumentReader : DocumentReader {
         val warnings: List<String>,
     )
 
+    /**
+     * Returns the JSON object in Claude's reply. It removes a Markdown code fence or a
+     * sentence before or after the object, if there is one.
+     */
+    private fun extractJson(text: String): String {
+        val start = text.indexOf('{')
+        val end = text.lastIndexOf('}')
+        if (start < 0 || end <= start) return text
+        return text.substring(start, end + 1)
+    }
+
     private fun parseDocument(json: JSONObject, frameCount: Int): ParsedPart {
         val title = json.optString("title", "").trim()
         val setup = parseSetup(json.optJSONObject("setup"))
@@ -567,7 +583,13 @@ class ClaudeDocumentReader : DocumentReader {
         if (arr == null) return emptyList()
         val runs = ArrayList<TextRun>()
         for (i in 0 until arr.length()) {
-            val r = arr.optJSONObject(i) ?: continue
+            val r = arr.optJSONObject(i)
+            if (r == null) {
+                // Accept a plain string as an unstyled run.
+                val plain = (arr.opt(i) as? String).orEmpty()
+                if (plain.isNotEmpty()) runs.add(TextRun(text = plain))
+                continue
+            }
             val text = r.optString("text", "")
             if (text.isEmpty()) continue
             runs.add(
@@ -651,18 +673,6 @@ class ClaudeDocumentReader : DocumentReader {
         return Bitmap.createBitmap(frame, x0, y0, cw, ch)
     }
 
-    // ---------------------------------------------------------------------
-    // JSON Schema for the structured reply
-    // ---------------------------------------------------------------------
-
-    private fun outputSchema(): JsonOutputFormat.Schema {
-        val builder = JsonOutputFormat.Schema.builder()
-        for ((key, value) in SCHEMA_MAP) {
-            builder.putAdditionalProperty(key, JsonValue.from(value))
-        }
-        return builder.build()
-    }
-
     companion object {
         private const val TAG = "ClaudeDocumentReader"
         private const val BATCH_SIZE = 6
@@ -677,148 +687,6 @@ class ClaudeDocumentReader : DocumentReader {
         private const val SERVICE_RETRIES = 2
         private const val PROGRESS_READ_SHARE = 0.95f
         private val COLOUR_REGEX = Regex("^#[0-9A-F]{6}$")
-
-        private fun nullable(type: String): List<String> = listOf(type, "null")
-
-        private fun obj(properties: Map<String, Any>): Map<String, Any> = mapOf(
-            "type" to "object",
-            "properties" to properties,
-            "required" to properties.keys.toList(),
-            "additionalProperties" to false,
-        )
-
-        private fun arraySchema(items: Any): Map<String, Any> = mapOf("type" to "array", "items" to items)
-
-        private val ALIGN_SCHEMA: Map<String, Any> = mapOf("type" to "string", "enum" to listOf("left", "centre", "right", "justify"))
-
-        private val RUN_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "text" to mapOf("type" to "string"),
-                "bold" to mapOf("type" to "boolean"),
-                "italic" to mapOf("type" to "boolean"),
-                "underline" to mapOf("type" to "boolean"),
-                "strike" to mapOf("type" to "boolean"),
-                "superscript" to mapOf("type" to "boolean"),
-                "subscript" to mapOf("type" to "boolean"),
-                "colour" to mapOf("type" to nullable("string")),
-                "link" to mapOf("type" to nullable("string")),
-            ),
-        )
-
-        private val CELL_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "runs" to arraySchema(RUN_SCHEMA),
-                "align" to ALIGN_SCHEMA,
-                "colSpan" to mapOf("type" to "integer"),
-                "fill" to mapOf("type" to nullable("string")),
-            ),
-        )
-
-        private val ROW_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "header" to mapOf("type" to "boolean"),
-                "cells" to arraySchema(CELL_SCHEMA),
-            ),
-        )
-
-        private val BOX_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "left" to mapOf("type" to "number"),
-                "top" to mapOf("type" to "number"),
-                "right" to mapOf("type" to "number"),
-                "bottom" to mapOf("type" to "number"),
-            ),
-        )
-
-        /** A single-value enum that fixes the block type for one branch of the schema. */
-        private fun typeTag(name: String): Map<String, Any> = mapOf("type" to "string", "enum" to listOf(name))
-
-        private val HEADING_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "type" to typeTag("heading"),
-                "level" to mapOf("type" to "integer"),
-                "align" to ALIGN_SCHEMA,
-                "runs" to arraySchema(RUN_SCHEMA),
-            ),
-        )
-
-        private val PARAGRAPH_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "type" to typeTag("paragraph"),
-                "align" to ALIGN_SCHEMA,
-                "sizeScale" to mapOf("type" to "number"),
-                "indentLevel" to mapOf("type" to "integer"),
-                "runs" to arraySchema(RUN_SCHEMA),
-            ),
-        )
-
-        private val LIST_ITEM_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "type" to typeTag("list_item"),
-                "ordered" to mapOf("type" to "boolean"),
-                "marker" to mapOf("type" to "string"),
-                "indentLevel" to mapOf("type" to "integer"),
-                "runs" to arraySchema(RUN_SCHEMA),
-            ),
-        )
-
-        private val TABLE_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "type" to typeTag("table"),
-                "rows" to arraySchema(ROW_SCHEMA),
-                "columnWidths" to arraySchema(mapOf("type" to "number")),
-                "gridLines" to mapOf("type" to "boolean"),
-            ),
-        )
-
-        private val IMAGE_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "type" to typeTag("image"),
-                "frame" to mapOf("type" to "integer"),
-                "box" to BOX_SCHEMA,
-                "widthFraction" to mapOf("type" to "number"),
-                "align" to ALIGN_SCHEMA,
-                "caption" to arraySchema(RUN_SCHEMA),
-            ),
-        )
-
-        private val RULE_SCHEMA: Map<String, Any> = obj(mapOf("type" to typeTag("rule")))
-
-        private val PAGE_BREAK_SCHEMA: Map<String, Any> = obj(mapOf("type" to typeTag("page_break")))
-
-        /** Each block carries only the fields of its own kind. This keeps the reply short. */
-        private val BLOCK_SCHEMA: Map<String, Any> = mapOf(
-            "anyOf" to listOf(
-                HEADING_SCHEMA,
-                PARAGRAPH_SCHEMA,
-                LIST_ITEM_SCHEMA,
-                TABLE_SCHEMA,
-                IMAGE_SCHEMA,
-                RULE_SCHEMA,
-                PAGE_BREAK_SCHEMA,
-            ),
-        )
-
-        private val SETUP_SCHEMA: Map<String, Any> = obj(
-            mapOf(
-                "paper" to mapOf("type" to "string", "enum" to listOf("A4", "LETTER", "SLIDE_16_9")),
-                "landscape" to mapOf("type" to "boolean"),
-                "fontFamily" to mapOf("type" to "string", "enum" to listOf("serif", "sans", "mono")),
-                "baseFontSizePt" to mapOf("type" to "number"),
-                "marginPt" to mapOf("type" to "number"),
-                "lineSpacing" to mapOf("type" to "number"),
-            ),
-        )
-
-        /** The whole schema as plain maps. Top-level keys are added to the SDK schema builder one by one. */
-        private val SCHEMA_MAP: Map<String, Any> = obj(
-            mapOf(
-                "title" to mapOf("type" to "string"),
-                "setup" to SETUP_SCHEMA,
-                "blocks" to arraySchema(BLOCK_SCHEMA),
-                "warnings" to arraySchema(mapOf("type" to "string")),
-            ),
-        )
 
         private val SYSTEM_PROMPT = """
 You rebuild documents from photos of a computer screen.
@@ -854,8 +722,15 @@ Overlap between frames
 - The frames overlap heavily because the document was scrolled slowly. Each piece of content must appear once in the output. Take each piece from the frame where it is sharpest.
 - If you are given text that was already transcribed from earlier frames, continue from where it ends and do not repeat it.
 
-Filling the JSON
-- Each block type has its own fields and no others:
+Reply format
+- Reply with one JSON object and nothing else: no Markdown code fence and no text before or after it.
+- The object has this shape:
+  {"title": "...", "setup": {"paper": "A4" | "LETTER" | "SLIDE_16_9", "landscape": false, "fontFamily": "serif" | "sans" | "mono", "baseFontSizePt": 11, "marginPt": 60, "lineSpacing": 1.15}, "blocks": [ ... ], "warnings": ["..."]}
+- A run of text is {"text": "...", "bold": false, "italic": false, "underline": false, "strike": false, "superscript": false, "subscript": false, "colour": null, "link": null}. You may leave out any field that is false or null.
+- A table row is {"header": false, "cells": [ {"runs": [ ... ], "align": "left", "colSpan": 1, "fill": null} ]}.
+- An image box is {"left": 0.1, "top": 0.2, "right": 0.9, "bottom": 0.6}.
+- align is one of "left", "centre", "right", "justify".
+- Each block has a "type" field and the fields of its kind:
   heading: type, level, align, runs.
   paragraph: type, align, sizeScale, indentLevel, runs.
   list_item: type, ordered, marker, indentLevel, runs.

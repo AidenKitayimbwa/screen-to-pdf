@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.aiden.screentopdf.R
 import com.aiden.screentopdf.ai.ApiKeyStore
+import com.aiden.screentopdf.core.CaptureRegion
 
 @Composable
 fun HomeScreen(
@@ -52,7 +53,11 @@ fun HomeScreen(
     val pickVideo = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
     ) { uri: Uri? ->
-        if (uri != null) onVideoPicked(uri)
+        if (uri != null) {
+            // A gallery video has no user-placed frame, so the cleaner detects the page itself.
+            CaptureRegion.corners = null
+            onVideoPicked(uri)
+        }
     }
 
     // Check again each time the screen comes back, for example after Settings.

@@ -1,7 +1,9 @@
 package com.aiden.screentopdf.processing
 
 import android.graphics.Bitmap
+import com.aiden.screentopdf.core.CaptureRegion
 import com.aiden.screentopdf.core.CapturedPage
+import com.aiden.screentopdf.core.Corners
 import com.aiden.screentopdf.core.PageCleaner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -24,8 +26,9 @@ import kotlin.math.roundToInt
  *
  * It keeps the picture faithful: colours, photos and grey text stay as they are.
  * Steps:
- * 1. Find the screen or document (the biggest bright 4-sided shape) and
- *    straighten it, as if filmed from straight in front.
+ * 1. Find the screen or document and straighten it, as if filmed from straight in front.
+ *    If the user placed the frame on the record screen ([CaptureRegion.corners]), those
+ *    4 corners are used. Otherwise it looks for the biggest bright 4-sided shape.
  * 2. Soften the fine wavy pattern you get when filming a screen (moiré).
  * 3. Gently balance the colours so bright areas are neutral white.
  * 4. Lift local contrast a little and sharpen text slightly.
@@ -53,8 +56,14 @@ class OpenCvPageCleaner : PageCleaner {
             if (input !== source) input.recycle()
 
             // Step 1: find the screen and fix the perspective.
-            val found = findPageCorners(rgba)
-            val ordered = found ?: wholeFrame(rgba)
+            // If the user placed the frame on the record screen, use their corners.
+            // Otherwise look for the screen automatically.
+            val placed = CaptureRegion.corners
+            val ordered = if (placed != null) {
+                cornersFromRegion(placed, rgba)
+            } else {
+                findPageCorners(rgba) ?: wholeFrame(rgba)
+            }
             val (outW, outH) = outputSize(ordered)
             val srcQuad = track(MatOfPoint2f(*ordered))
             val dstQuad = track(
@@ -217,6 +226,25 @@ class OpenCvPageCleaner : PageCleaner {
             sum += a.x * b.y - b.x * a.y
         }
         return abs(sum) / 2.0
+    }
+
+    /**
+     * Turns the user's corners (fractions of the frame, order top-left, top-right,
+     * bottom-right, bottom-left) into pixel points on this picture.
+     */
+    private fun cornersFromRegion(region: Corners, mat: Mat): Array<Point> {
+        val w = mat.cols() - 1.0
+        val h = mat.rows() - 1.0
+        fun at(x: Float, y: Float) = Point(
+            (x.toDouble() * w).coerceIn(0.0, w),
+            (y.toDouble() * h).coerceIn(0.0, h),
+        )
+        return arrayOf(
+            at(region.topLeftX, region.topLeftY),
+            at(region.topRightX, region.topRightY),
+            at(region.bottomRightX, region.bottomRightY),
+            at(region.bottomLeftX, region.bottomLeftY),
+        )
     }
 
     private fun wholeFrame(mat: Mat): Array<Point> {

@@ -35,7 +35,8 @@
     <string name="capture_permission_denied">Camera access is off. You can turn it on in the app settings.</string>
     <string name="capture_grant">Allow camera</string>
     <string name="capture_open_settings">Open settings</string>
-    <string name="capture_hint">Fit the screen inside the frame. Scroll slowly.</string>
+    <string name="capture_hint">Drag the corners to the edges of the document.</string>
+    <string name="capture_reset">Reset</string>
     <string name="capture_record">Record</string>
     <string name="capture_stop">Stop</string>
     <string name="capture_camera_failed">Could not start the camera.</string>
